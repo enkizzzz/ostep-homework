@@ -1,153 +1,115 @@
-#! /usr/bin/env python3
+#!/usr/bin/env python3
 
-from __future__ import print_function
 import sys
-from optparse import OptionParser
 import random
+from argparse import ArgumentParser
 
-# to make Python2 and Python3 act the same -- how dumb
-def random_seed(seed):
+def set_random_seed(seed_value):
     try:
-        random.seed(seed, version=1)
+        random.seed(seed_value, version=1)
     except:
-        random.seed(seed)
-    return
+        random.seed(seed_value)
 
-parser = OptionParser()
-parser.add_option("-s", "--seed", default=0, help="the random seed", action="store", type="int", dest="seed")
-parser.add_option("-j", "--jobs", default=3, help="number of jobs in the system", action="store", type="int", dest="jobs")
-parser.add_option("-l", "--jlist", default="", help="instead of random jobs, provide a comma-separated list of run times", action="store", type="string", dest="jlist")
-parser.add_option("-m", "--maxlen", default=10, help="max length of job", action="store", type="int", dest="maxlen")
-parser.add_option("-p", "--policy", default="FIFO", help="sched policy to use: SJF, FIFO, RR", action="store", type="string", dest="policy")
-parser.add_option("-q", "--quantum", help="length of time slice for RR policy", default=1, action="store", type="int", dest="quantum")
-parser.add_option("-c", help="compute answers for me", action="store_true", default=False, dest="solve")
+def perform_job(job_description, start):
+    job_id, duration, _ = job_description
+    print(f'  [ time {start:.2f} ] Execute job {job_id} for {duration:.2f} secs (FINISH at {start + duration:.2f})')
+    return start + duration
 
-(options, args) = parser.parse_args()
+def manage_fifo(jobs_list, start):
+    while jobs_list:
+        job = jobs_list.pop(0)
+        if start < job[2]:
+            print(f'  [ time {start:.2f} ] Wait until {job[2]:.2f}')
+            start = job[2]
+        start = perform_job(job, start)
+    return start
 
-random_seed(options.seed)
+def process_round_robin(jobs_list, time_slice):
+    from collections import deque
+    queue = deque(jobs_list)
+    current_time = 0
+    while queue:
+        job = queue.popleft()
+        if current_time < job[2]:
+            print(f'  [ time {current_time:.2f} ] Wait until {job[2]:.2f}')
+            current_time = job[2]
+        exec_time = min(job[1], time_slice)
+        job[1] -= exec_time
+        print(f'  [ time {current_time:.2f} ] Execute job {job[0]} for {exec_time:.2f} secs')
+        current_time += exec_time
+        if job[1] > 0:
+            queue.append(job)
+        else:
+            print(f'  Job {job[0]} finished at time {current_time:.2f}')
+    return current_time
 
-print('ARG policy', options.policy)
-if options.jlist == '':
-    print('ARG jobs', options.jobs)
-    print('ARG maxlen', options.maxlen)
-    print('ARG seed', options.seed)
-else:
-    print('ARG jlist', options.jlist)
-print('')
+def process_sjf(jobs_list):
+    import heapq
+    time_now = 0
+    ready_jobs = []
+    current_job = None
 
-print('Here is the job list, with the run time of each job: ')
+    while jobs_list or ready_jobs:
+        while jobs_list and jobs_list[0][2] <= time_now:
+            job = heapq.heappop(jobs_list)
+            heapq.heappush(ready_jobs, (job[1], job[2], job[0]))
 
-import operator
+        if current_job and (not ready_jobs or current_job[0] <= ready_jobs[0][0]):
+            duration_to_run = min(current_job[0], (ready_jobs[0][2] if ready_jobs else float('inf')) - time_now)
+            print(f'  [ time {time_now:.2f} ] Execute job {current_job[2]} for {duration_to_run:.2f} secs')
+            time_now += duration_to_run
+            current_job = (current_job[0] - duration_to_run, current_job[1], current_job[2])
+            if current_job[0] == 0:
+                print(f'  Job {current_job[2]} finished at time {time_now:.2f}')
+                current_job = None
+        else:
+            if current_job:
+                heapq.heappush(ready_jobs, current_job)
+            if ready_jobs:
+                current_job = heapq.heappop(ready_jobs)
+                continue
 
-joblist = []
-if options.jlist == '':
-    for jobnum in range(0,options.jobs):
-        runtime = int(options.maxlen * random.random()) + 1
-        joblist.append([jobnum, runtime])
-        print('  Job', jobnum, '( length = ' + str(runtime) + ' )')
-else:
-    jobnum = 0
-    for runtime in options.jlist.split(','):
-        joblist.append([jobnum, float(runtime)])
-        jobnum += 1
-    for job in joblist:
-        print('  Job', job[0], '( length = ' + str(job[1]) + ' )')
-print('\n')
+        if not current_job and jobs_list:
+            next_arrival = jobs_list[0][2]
+            print(f'  [ time {time_now:.2f} ] Wait until {next_arrival:.2f}')
+            time_now = next_arrival
 
-if options.solve == True:
-    print('** Solutions **\n')
-    if options.policy == 'SJF':
-        joblist = sorted(joblist, key=operator.itemgetter(1))
-        options.policy = 'FIFO'
-    
-    if options.policy == 'FIFO':
-        thetime = 0
-        print('Execution trace:')
-        for job in joblist:
-            print('  [ time %3d ] Run job %d for %.2f secs ( DONE at %.2f )' % (thetime, job[0], job[1], thetime + job[1]))
-            thetime += job[1]
+def main():
+    parser = ArgumentParser()
+    parser.add_argument("-s", "--seed", default=0, type=int, help="set random seed")
+    parser.add_argument("-j", "--jobs", default=3, type=int, help="number of jobs in the system")
+    parser.add_argument("-l", "--jlist", default="", type=str, help="comma-separated list of run times instead of random generation")
+    parser.add_argument("-m", "--maxlen", default=10, type=int, help="maximum length of job")
+    parser.add_argument("-p", "--policy", default="FIFO", type=str, help="scheduling policy: SJF, FIFO, RR")
+    parser.add_argument("-q", "--quantum", default=1, type=int, help="time slice for RR policy")
+    parser.add_argument("-c", action="store_true", default=False, help="compute answers")
+    parser.add_argument("-a", "--arrival", default="", type=str, help="comma-separated list of arrival times")
 
-        print('\nFinal statistics:')
-        t     = 0.0
-        count = 0
-        turnaroundSum = 0.0
-        waitSum       = 0.0
-        responseSum   = 0.0
-        for tmp in joblist:
-            jobnum  = tmp[0]
-            runtime = tmp[1]
-            
-            response   = t
-            turnaround = t + runtime
-            wait       = t
-            print('  Job %3d -- Response: %3.2f  Turnaround %3.2f  Wait %3.2f' % (jobnum, response, turnaround, wait))
-            responseSum   += response
-            turnaroundSum += turnaround
-            waitSum       += wait
-            t += runtime
-            count = count + 1
-        print('\n  Average -- Response: %3.2f  Turnaround %3.2f  Wait %3.2f\n' % (responseSum/count, turnaroundSum/count, waitSum/count))
-                     
-    if options.policy == 'RR':
-        print('Execution trace:')
-        turnaround = {}
-        response = {}
-        lastran = {}
-        wait = {}
-        quantum  = float(options.quantum)
-        jobcount = len(joblist)
-        for i in range(0,jobcount):
-            lastran[i] = 0.0
-            wait[i] = 0.0
-            turnaround[i] = 0.0
-            response[i] = -1
+    args = parser.parse_args()
+    set_random_seed(args.seed)
 
-        runlist = []
-        for e in joblist:
-            runlist.append(e)
+    job_queue = []
+    if args.jlist == '':
+        for i in range(args.jobs):
+            runtime = int(args.maxlen * random.random()) + 1
+            arrival_time = 0 if args.arrival == '' else int(args.arrival.split(',')[i])
+            job_queue.append([i, runtime, arrival_time])
+    else:
+        runtimes = args.jlist.split(',')
+        for i, runtime in enumerate(runtimes):
+            arrival_time = 0 if args.arrival == '' else int(args.arrival.split(',')[i])
+            job_queue.append([i, float(runtime), arrival_time])
 
-        thetime  = 0.0
-        while jobcount > 0:
-            job = runlist.pop(0)
-            jobnum  = job[0]
-            runtime = float(job[1])
-            if response[jobnum] == -1:
-                response[jobnum] = thetime
-            currwait = thetime - lastran[jobnum]
-            wait[jobnum] += currwait
-            if runtime > quantum:
-                runtime -= quantum
-                ranfor = quantum
-                print('  [ time %3d ] Run job %3d for %.2f secs' % (thetime, jobnum, ranfor))
-                runlist.append([jobnum, runtime])
-            else:
-                ranfor = runtime;
-                print('  [ time %3d ] Run job %3d for %.2f secs ( DONE at %.2f )' % (thetime, jobnum, ranfor, thetime + ranfor))
-                turnaround[jobnum] = thetime + ranfor
-                jobcount -= 1
-            thetime += ranfor
-            lastran[jobnum] = thetime
+    job_queue.sort(key=lambda job: job[2])
 
-        print('\nFinal statistics:')
-        turnaroundSum = 0.0
-        waitSum       = 0.0
-        responseSum   = 0.0
-        for i in range(0,len(joblist)):
-            turnaroundSum += turnaround[i]
-            responseSum += response[i]
-            waitSum += wait[i]
-            print('  Job %3d -- Response: %3.2f  Turnaround %3.2f  Wait %3.2f' % (i, response[i], turnaround[i], wait[i]))
-        count = len(joblist)
-        
-        print('\n  Average -- Response: %3.2f  Turnaround %3.2f  Wait %3.2f\n' % (responseSum/count, turnaroundSum/count, waitSum/count))
+    if args.c:
+        print('** Solutions **\n')
+        if args.policy == 'SJF':
+            process_sjf(job_queue)
+        elif args.policy == 'FIFO':
+            manage_fifo(job_queue, 0)
+        elif args.policy == 'RR':
+            process_round_robin(job_queue, args.quantum)
 
-    if options.policy != 'FIFO' and options.policy != 'SJF' and options.policy != 'RR': 
-        print('Error: Policy', options.policy, 'is not available.')
-        sys.exit(0)
-else:
-    print('Compute the turnaround time, response time, and wait time for each job.')
-    print('When you are done, run this program again, with the same arguments,')
-    print('but with -c, which will thus provide you with the answers. You can use')
-    print('-s <somenumber> or your own job list (-l 10,15,20 for example)')
-    print('to generate different problems for yourself.')
-    print('')
+if __name__ == "__main__":
+    main()
